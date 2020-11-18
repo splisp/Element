@@ -45,7 +45,9 @@
 namespace Element {
 
 static const char* pluginListKey() { return Settings::pluginListKey; }
-/* noop. prevent OS error dialogs from child process */ 
+
+//=============================================================================
+/* noop. prevent OS error dialogs from child process */
 static void pluginScannerSlaveCrashHandler (void*) { }
 
 class PluginScannerMaster : public kv::ChildProcessMaster,
@@ -232,7 +234,9 @@ private:
     }
 };
 
-class PluginScannerSlave : public kv::ChildProcessSlave, public AsyncUpdater
+//=============================================================================
+class PluginScannerSlave : public kv::ChildProcessSlave,
+                           public AsyncUpdater
 {
 public:
     PluginScannerSlave()
@@ -260,6 +264,12 @@ public:
             const auto formats (StringArray::fromTokens (message.trim(), ",", "'"));
             formatsToScan = formats;
             triggerAsyncUpdate();
+        }
+
+        if (type == "validate")
+        {
+            const auto formatName = message.upToFirstOccurrenceOf (":", false, false).trim();
+            const auto fileOrIdentifier = message.fromFirstOccurrenceOf (":", false, false).trim();
         }
     }
     
@@ -294,6 +304,7 @@ public:
             return;
         
         auto& list = plugins->getKnownPlugins();
+        
         const auto types = list.getTypes();
         for (const auto& type : types)
             pluginList.addType (type);
@@ -373,6 +384,9 @@ private:
     bool doNextScan()
     {
         const auto nextFile = scanner->getNextPluginFileThatWillBeScanned();
+        if (nullptr != pluginList.getTypeForFile (nextFile))
+            return true;
+
         sendString ("name", nextFile);
         for (const auto& file : scanner->getFailedFiles())
             pluginList.addToBlacklist (file);
@@ -415,9 +429,223 @@ private:
     }
 };
 
-// MARK: Plugin Scanner
+class PluginScannerSlave2 : public kv::ChildProcessSlave,
+                            public AsyncUpdater
+{
+public:
+    PluginScannerSlave2()
+    {
+        scanFile = PluginScanner::getSlavePluginListFile();
+        SystemStats::setApplicationCrashHandler (pluginScannerSlaveCrashHandler);
+    }
+    
+    ~PluginScannerSlave2() { }
+    
+    void handleMessageFromMaster (const MemoryBlock& mb) override
+    {
+        const auto msg = mb.toString().trim();
+        if (msg.isNotEmpty())
+        {
+            idsToScan.add (msg);
+        }
+    }
+    
+    void handleAsyncUpdate() override
+    {
+        while (idsToScan.size() > 0)
+        {
+            const auto data (idsToScan.getLast());
+            idsToScan.removeLast();
+            const auto type (data.upToFirstOccurrenceOf (":", false, false));
+            const auto message (data.fromFirstOccurrenceOf (":", false, false));
+            
+            if (type == "quit")
+            {
+                handleConnectionLost();
+                break;
+            }
+            
+            else if (type == "scan")
+            {
+                const auto formats (StringArray::fromTokens (message.trim(), ",", "'"));
+                formatsToScan = formats;
+                processFormatScan();
+            }
 
-PluginScanner::PluginScanner (KnownPluginList& listToManage) : list(listToManage) { }
+            else if (type == "validate")
+            {
+                const auto plugIDs (StringArray::fromTokens (message.trim(), ",", "'"));
+                for (const auto& plugID : plugIDs)
+                    scanSingle (plugID);
+            }
+        }
+    }
+
+    void scanSingle (const String& fileOrIdentifier)
+    {
+        plugins->getUnverifiedPlugins()
+        pluginList.scanAndAddFile ()
+    }
+    
+    void processFormatScan()
+    {
+        if (! scanFile.existsAsFile())
+        {
+            sendState ("scanning");
+            sendState ("finished");
+            return;
+        }
+        
+        updateScanFileWithSettings();
+        
+        sendState ("scanning");
+        
+        for (const auto& format : formatsToScan)
+            scanFor (format);
+        
+        settings->saveIfNeeded();
+        sendState ("finished");
+
+       #if JUCE_LINUX
+        // workaround to get the background process to quit
+        handleConnectionLost();
+       #endif
+    }
+    
+    void updateScanFileWithSettings()
+    {
+        if (! plugins)
+            return;
+        
+        auto& list = plugins->getKnownPlugins();
+        
+        const auto types = list.getTypes();
+        for (const auto& type : types)
+            pluginList.addType (type);
+        
+        for (const auto& file : list.getBlacklistedFiles())
+            pluginList.addToBlacklist (file);
+        
+        writePluginListNow();
+    }
+    
+    void handleConnectionMade() override
+    {
+        settings    = new Settings();
+        plugins     = new PluginManager();
+        
+        if (! scanFile.existsAsFile())
+            scanFile.create();
+        
+        if (auto xml = XmlDocument::parse (scanFile))
+            pluginList.recreateFromXml (*xml);
+        
+        // This must happen before user settings, PluginManager will delete the deadman file
+        // when restoring user plugins
+        PluginDirectoryScanner::applyBlacklistingsFromDeadMansPedal (
+            pluginList, plugins->getDeadAudioPluginsFile());
+        
+        plugins->addDefaultFormats();
+        plugins->restoreUserPlugins (*settings);
+        
+        sendState (EL_PLUGIN_SCANNER_READY_ID);
+    }
+    
+    void handleConnectionLost() override
+    {
+        settings    = nullptr;
+        plugins     = nullptr;
+        scanner     = nullptr;
+        exit (0);
+    }
+
+private:
+    ScopedPointer<Settings> settings;
+    ScopedPointer<PluginManager> plugins;
+    ScopedPointer<PluginDirectoryScanner> scanner;
+    String fileOrIdentifier;
+    KnownPluginList pluginList;
+    StringArray filesToSkip;
+    File scanFile;
+    StringArray formatsToScan;
+    Array<String, CriticalSection> idsToScan;
+
+    void applyDeadPlugins()
+    {
+        PluginDirectoryScanner::applyBlacklistingsFromDeadMansPedal (
+            pluginList, plugins->getDeadAudioPluginsFile());
+    }
+    
+    bool writePluginListNow()
+    {
+        applyDeadPlugins();
+        if (auto xml = pluginList.createXml())
+            return xml->writeToFile (scanFile, String());
+        return false;
+    }
+    
+    bool sendState (const String& state)
+    {
+        return sendString ("state", state);
+    }
+    
+    bool sendString (const String& type, const String& message)
+    {
+		String data = type; data << ":" << message.trim();
+		MemoryBlock mb (data.toRawUTF8(), data.getNumBytesAsUTF8());
+        return sendMessageToMaster (mb);
+    }
+    
+    bool doNextScan()
+    {
+        const auto nextFile = scanner->getNextPluginFileThatWillBeScanned();
+        if (nullptr != pluginList.getTypeForFile (nextFile))
+            return true;
+
+        sendString ("name", nextFile);
+        for (const auto& file : scanner->getFailedFiles())
+            pluginList.addToBlacklist (file);
+
+        if (scanner->scanNextFile (true, fileOrIdentifier))
+        {
+            writePluginListNow();
+            return true;
+        }
+        
+        return false;
+    }
+    
+    void scanFor (const String& formatName)
+    {
+        if (plugins == nullptr || settings == nullptr)
+            return;
+        if (auto* format = plugins->getAudioPluginFormat (formatName))
+            scanFor (*format);
+    }
+    
+    void scanFor (AudioPluginFormat& format)
+    {
+        if (plugins == nullptr || settings == nullptr)
+            return;
+        
+        const auto key = String(settings->lastPluginScanPathPrefix) + format.getName();
+        FileSearchPath path (settings->getUserSettings()->getValue (key));
+        scanner = new PluginDirectoryScanner (pluginList, format, path, true,
+                                              plugins->getDeadAudioPluginsFile(),
+                                              false);
+        
+        while (doNextScan())
+            sendString ("progress", String (scanner->getProgress()));
+        
+        writePluginListNow();
+        #if JUCE_LINUX
+        Thread::sleep (1000);
+        #endif
+    }
+};
+
+//=============================================================================
+PluginScanner::PluginScanner (KnownPluginList& listToManage) : list (listToManage) { }
 PluginScanner::~PluginScanner()
 {
     listeners.clear();
@@ -456,8 +684,7 @@ void PluginScanner::timerCallback()
 {
 }
 
-// MARK: Unverified Plugins
-
+//=============================================================================
 typedef HashMap<String, StringArray> UnverifiedPluginMap;
 typedef HashMap<String, FileSearchPath> UnverifiedPluginPaths;
 
@@ -480,7 +707,7 @@ public:
 
         if (props)
         {
-            const StringArray formats = { "AU", "VST", "VST3", "LV2" };
+            const StringArray formats = { "AU", "VST", "VST3", "LV2", "LADSPA" };
             for (const auto& f : formats)
             {
                 const auto key = String(Settings::lastPluginScanPathPrefix) + f;
