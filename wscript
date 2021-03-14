@@ -118,7 +118,7 @@ def configure (conf):
     if len(conf.options.cross) <= 0:
         conf.prefer_clang()
     
-    conf.load ("compiler_c compiler_cxx ccache ar cross juce")
+    conf.load ("clang clangxx ccache cross juce")
 
     conf.check_cxx_version()
     silence_warnings (conf)
@@ -128,9 +128,9 @@ def configure (conf):
     conf.find_program ('ldoc',    mandatory=False)
 
     conf.check_common()
-    if cross.is_mingw(conf): conf.check_mingw()
+    if cross.is_mingw (conf): conf.check_mingw()
     elif juce.is_mac(): conf.check_mac()
-    else: conf.check_linux()
+    elif juce.is_linux(): conf.check_linux()
 
     conf.env.TEST = bool(conf.options.test)
     conf.env.DEBUG = conf.options.debug
@@ -317,8 +317,9 @@ def copy_app_bundle_lua_files(ctx):
 
 def build_app (bld):
     libEnv = bld.env.derive()
-    for k in 'CFLAGS CXXFLAGS LINKFLAGS'.split():
-        libEnv.append_unique (k, [ '-fPIC' ])
+    if not juce.is_windows():
+        for k in 'CFLAGS CXXFLAGS LINKFLAGS'.split():
+            libEnv.append_unique (k, [ '-fPIC' ])
 
     library = bld (
         features    = 'cxx cxxstlib',

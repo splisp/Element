@@ -63,8 +63,8 @@ def check_juce (self):
         self.end_msg ('no')
 
 @conf
-def check_rez (self):
-    self.find_program("Rez")
+def check_rez (self, **k):
+    self.find_program("Rez", **k)
 
 @conf
 def check_cxx_version (self, required=False):
@@ -79,9 +79,9 @@ def check_cxx_version (self, required=False):
     elif is_linux() or len(self.options.cross) > 0:
         self.check_cxx (cxxflags = [ "-std=c++17" ], mandatory = required)
         self.env.append_unique ("CXXFLAGS", [ "-std=c++17" ])
-    else:
-        print("setup cxx version for " + platform.system())
-        exit(1)
+    elif is_windows() and 'clang' in self.env.CC [0]:
+        self.check_cxx (cxxflags = [ "-std=c++17" ], mandatory = required)
+        self.env.append_unique ("CXXFLAGS", [ "-std=c++17" ])
 
     self.line_just = line_just
 
