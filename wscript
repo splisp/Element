@@ -41,16 +41,26 @@ def options (opt):
     opt.add_option ('--ziptype', default='gz', dest='ziptype', type='string', 
         help='Zip type for waf dist (gz/bz2/zip) [ Default: gz ]')
 
+def append_compiler_flags (conf, flags):
+    conf.env.append_unique ('CFLAGS', flags)
+    conf.env.append_unique ('CXXFLAGS', flags)
+    
 def silence_warnings (conf):
     '''TODO: resolve these'''
-    conf.env.append_unique ('CFLAGS', ['-Wno-deprecated-declarations'])
-    conf.env.append_unique ('CXXFLAGS', ['-Wno-deprecated-declarations'])
+    append_compiler_flags (conf, ['-Wno-deprecated-declarations'])
     
     if 'clang' in conf.env.CXX[0]:
-        conf.env.append_unique ('CFLAGS', ['-Wno-deprecated-register'])
-        conf.env.append_unique ('CXXFLAGS', ['-Wno-deprecated-register'])
-        conf.env.append_unique ('CFLAGS', ['-Wno-dynamic-class-memaccess'])
-        conf.env.append_unique ('CXXFLAGS', ['-Wno-dynamic-class-memaccess'])
+        append_compiler_flags (conf, [
+            '-Wno-deprecated-register',
+            '-Wno-dynamic-class-memaccess'
+        ])
+
+    if juce.is_windows():
+        append_compiler_flags (conf, [
+            '-Wno-microsoft-cast',
+            '-Wno-implicit-const-int-float-conversion',
+            '-Wno-microsoft-unqualified-friend'
+        ])
 
 def configure_product (conf):
     conf.define ('EL_PRO', 1)
@@ -115,11 +125,15 @@ def configure (conf):
     ])
 
     cross.setup_compiler (conf)
-    if len(conf.options.cross) <= 0:
+    if len (conf.options.cross) <= 0:
         conf.prefer_clang()
     
     conf.load ("clang clangxx ccache cross juce")
-
+    conf.env.append_unique ('CPPFLAGS', [
+        '-Ic:/KVSDK/include',
+        '-Ic:/KVSDK/vstsdk2.4',
+        '-Ic:/KVSDK/ASIOSDK2.3/common'
+    ])
     conf.check_cxx_version()
     silence_warnings (conf)
 
@@ -325,12 +339,13 @@ def build_app (bld):
         features    = 'cxx cxxstlib',
         source      = common_sources (bld),
         includes    = common_includes(),
-        target      = 'lib/element-0',
+        target      = 'lib/element',
         name        = 'ELEMENT',
         env         = libEnv,
         use         = [ 'BOOST_SIGNALS' ],
         cxxflags    = [],
-        install_path = None
+        install_path = None,
+        cwd         = 'build'
     )
 
     bld.add_group()
